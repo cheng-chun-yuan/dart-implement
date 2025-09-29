@@ -193,10 +193,10 @@ class ChineseDataLoader:
             FileNotFoundError: CSV文件不存在
             ValueError: CSV格式錯誤
         """
-        logger.info(f"Loading Chinese dataset from: {self.csv_path}")
+        logger.info(f"Loading Chinese dataset from: {self.config.csv_path}")
         
         try:
-            with open(self.csv_path, 'r', encoding='utf-8') as f:
+            with open(self.config.csv_path, 'r', encoding='utf-8') as f:
                 reader = csv.reader(f)
                 next(reader)  # 跳過標題行
                 
@@ -223,7 +223,7 @@ class ChineseDataLoader:
             return self.harmful_prompts
             
         except FileNotFoundError:
-            logger.error(f"CSV file not found: {self.csv_path}")
+            logger.error(f"CSV file not found: {self.config.csv_path}")
             raise
         except Exception as e:
             logger.error(f"Error loading CSV: {e}")

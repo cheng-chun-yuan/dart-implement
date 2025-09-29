@@ -753,5 +753,15 @@ def test_chinese_vec2text():
         print(f"  {key}: {value:.3f}" if isinstance(value, float) else f"  {key}: {value}")
 
 
+# Create unified interface - prefer torch implementation, fallback to pure Python  
+try:
+    # Try to use torch-based implementation first
+    if HF_AVAILABLE:
+        ChineseVec2Text = FallbackVec2Text  # Use fallback for now, can switch to ChineseVec2TextModel when ready
+    else:
+        ChineseVec2Text = FallbackVec2Text
+except:
+    ChineseVec2Text = FallbackVec2Text
+
 if __name__ == "__main__":
     test_chinese_vec2text()

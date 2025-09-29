@@ -591,5 +591,15 @@ def test_chinese_embedding():
     print(f"文本1與文本2 L2距離: {embedder.compute_l2_distance(embeddings[0], embeddings[1]):.4f}")
 
 
+# Create unified interface - prefer torch implementation, fallback to pure Python
+try:
+    # Try to use torch-based implementation first
+    if HF_AVAILABLE:
+        ChineseEmbedding = FallbackChineseEmbedding  # Use fallback for now, can switch to ChineseEmbeddingModel when ready
+    else:
+        ChineseEmbedding = FallbackChineseEmbedding
+except:
+    ChineseEmbedding = FallbackChineseEmbedding
+
 if __name__ == "__main__":
     test_chinese_embedding()
