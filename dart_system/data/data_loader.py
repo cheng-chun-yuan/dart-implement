@@ -224,7 +224,8 @@ class ChineseDataLoader:
             
         except FileNotFoundError:
             logger.error(f"CSV file not found: {self.config.csv_path}")
-            raise
+            self.harmful_prompts = []
+            return []
         except Exception as e:
             logger.error(f"Error loading CSV: {e}")
             raise ValueError(f"Failed to load CSV data: {e}")
