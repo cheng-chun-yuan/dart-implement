@@ -5,20 +5,20 @@ Complete implementation of DART (Diffusion for Auditing and Red-Teaming) for Chi
 ## Features
 
 - **Chinese Text Processing**: Specialized for Traditional Chinese toxic content
-- **SBERT Embedding**: Uses `uer/sbert-base-chinese-nli` for semantic understanding  
-- **T5 Reconstruction**: Leverages `uer/t5-base-chinese-cluecorpussmall` for text generation
+- **SBERT Embedding**: Uses `uer/sbert-base-chinese-nli` for semantic understanding
+- **Vec2Text Reconstruction**: Text generation with noise-based perturbation
+- **PPO Training**: Proximal Policy Optimization for adversarial text generation
 - **Toxicity Classification**: Comprehensive Chinese harmful content detection
 - **Semantic Preservation**: Maintains meaning while generating adversarial examples
-- **GPU Optimization**: RTX 4080 optimized with FP16 precision
-- **Robust Fallback**: Works without HuggingFace models using heuristic approaches
+- **GPU Optimization**: CUDA-accelerated training and inference
 
 ## Quick Start
 
 ### Prerequisites
 
-- Python 3.9+
+- Python 3.9 (required, <3.10 for compatibility)
 - [uv](https://github.com/astral-sh/uv) package manager
-- CUDA-compatible GPU (optional, CPU fallback available)
+- CUDA-compatible GPU (recommended, CPU fallback available)
 
 ### Installation
 
@@ -31,23 +31,27 @@ cd diffusion_dart
 uv sync
 ```
 
-### Basic Usage
+### Training
 
 ```bash
-# Run system component tests
-uv run python test_dart_simple.py
+# Basic training
+uv run python train_dart.py --dataset problem.csv --epochs 10
 
-# Quick system validation
-uv run python dart_main_complete.py --mode test --quick
+# Advanced training with custom parameters
+uv run python train_dart.py \
+    --dataset problem.csv \
+    --epochs 20 \
+    --batch-size 32 \
+    --lr 1e-4 \
+    --initial-sigma 1.0 \
+    --final-sigma 0.01 \
+    --anneal-strategy cosine \
+    --device cuda
 
-# Full evaluation on Chinese dataset
-uv run python dart_main_complete.py --mode evaluation --dataset problem.csv --sample-size 100
-
-# Interactive mode for single text testing
-uv run python dart_main_complete.py --mode interactive
-
-# Custom configuration with GPU acceleration
-uv run python dart_main_complete.py --mode inference --epsilon 0.03 --fp16 --batch-size 16
+# Resume from checkpoint
+uv run python train_dart.py \
+    --dataset problem.csv \
+    --resume checkpoints/checkpoint_epoch_5.pt
 ```
 
 ## System Architecture
@@ -55,148 +59,213 @@ uv run python dart_main_complete.py --mode inference --epsilon 0.03 --fp16 --bat
 ### Core Components
 
 1. **Chinese Embedding Model** (`dart_system/embedding/`)
-   - HuggingFace SBERT integration
-   - Embedding perturbation with epsilon constraint
-   - Semantic similarity validation
-   - Unicode-based fallback implementation
+   - Converts Chinese text to 768-dim semantic vectors
+   - SBERT-based: `uer/sbert-base-chinese-nli`
+   - Semantic similarity computation
+   - Batch processing support
 
-2. **Vec2Text Reconstruction** (`dart_system/reconstruction/`)
-   - T5-based Chinese text generation
-   - Iterative refinement for quality improvement
-   - Heuristic synonym replacement fallback
-   - Text similarity scoring
+2. **Noise Scheduler** (`dart_system/training/noise_scheduler.py`)
+   - Diffusion noise generation
+   - Sigma annealing: linear, cosine, exponential
+   - Controls perturbation strength over training
 
-3. **Toxicity Classification** (`dart_system/toxicity/`)
-   - Chinese harmful keyword detection
-   - Jailbreak pattern recognition
-   - Multi-level toxicity scoring (0.0-1.0)
-   - Reinforcement learning reward signals
+3. **Vec2Text Reconstruction** (`dart_system/reconstruction/`)
+   - Converts perturbed embeddings back to text
+   - Heuristic-based reconstruction
+   - Quality scoring
 
-4. **Dataset Processing** (`dart_system/data/`)
-   - CSV dataset loading for `problem.csv`
-   - Chinese text preprocessing and validation
-   - Batch processing for efficient inference
-   - Quality validation and statistics
+4. **PPO Loss** (`dart_system/training/ppo_loss.py`)
+   - Policy gradient optimization
+   - KL divergence regularization
+   - Proximity constraint (β parameter)
+   - Reward-based training
 
-5. **DART Pipeline** (`dart_system/core/`)
-   - End-to-end attack generation
-   - Performance metrics and reporting
-   - Automatic fallback system
-   - GPU/CPU optimization
+5. **Toxicity Classification** (`dart_system/toxicity/`)
+   - Chinese harmful content detection
+   - Binary classification (toxic/benign)
+   - Confidence scoring
 
-## Command-Line Interface
+6. **Dataset Loader** (`dart_system/data/`)
+   - CSV dataset processing
+   - Batch generation
+   - Train/validation splitting
 
-### Operation Modes
+## Training Pipeline
 
-```bash
-# Inference mode - Run attacks on dataset
-uv run python dart_main_complete.py --mode inference --dataset problem.csv
+The training follows Algorithm 1 from the DART paper:
 
-# Evaluation mode - Comprehensive analysis with metrics
-uv run python dart_main_complete.py --mode evaluation --dataset problem.csv --output results/
-
-# Test mode - System validation and component testing
-uv run python dart_main_complete.py --mode test [--quick]
-
-# Interactive mode - Single text testing
-uv run python dart_main_complete.py --mode interactive
+```python
+For each epoch:
+    For each batch:
+        1. embeddings = embedder(prompts)           # Text → vectors
+        2. noise = noise_scheduler.sample()         # Sample Gaussian noise
+        3. modified_prompts = vec2text(emb - noise) # Vec → perturbed text
+        4. rewards = reward_model(emb, modified_emb) # Compute rewards
+        5. loss = ppo_loss(log_probs, rewards)      # PPO objective
+        6. optimizer.step()                         # Update parameters
 ```
 
-### Key Parameters
+## Command-Line Options
+
+### Training Parameters
 
 ```bash
-# Attack parameters
---epsilon 0.05              # Perturbation magnitude constraint
---similarity-threshold 0.9  # Minimum semantic similarity
---temperature 0.7          # Generation temperature
+--dataset PATH              # Path to CSV dataset (required)
+--epochs N                  # Number of training epochs (default: 10)
+--batch-size N              # Training batch size (default: 32)
+--lr FLOAT                  # Learning rate (default: 1e-4)
+```
 
-# Model selection
---embedding-model uer/sbert-base-chinese-nli
---vec2text-model uer/t5-base-chinese-cluecorpussmall
+### Model Parameters
 
-# Performance options
---batch-size 8             # Processing batch size
---max-length 32           # Maximum sequence length
---fp16                    # Use FP16 precision for speed
---device cuda             # Force device selection
+```bash
+--embedding-dim N           # Embedding dimension (default: 768)
+--beta FLOAT               # Regularization coefficient β (default: 0.01)
+```
 
-# Dataset options
---sample-size 100         # Limit number of samples
---output results/         # Output directory for results
+### Noise Scheduling
+
+```bash
+--initial-sigma FLOAT       # Initial noise level σ (default: 1.0)
+--final-sigma FLOAT        # Final noise level σ (default: 0.01)
+--anneal-strategy STR      # Annealing: linear|cosine|exponential
+```
+
+### Device & Checkpointing
+
+```bash
+--device cuda|cpu          # Training device (default: cuda)
+--checkpoint-dir PATH      # Checkpoint directory (default: checkpoints/)
+--save-interval N          # Save every N steps (default: 100)
+--resume PATH              # Resume from checkpoint
+```
+
+### Logging
+
+```bash
+--log-file PATH            # Log file path (default: stdout only)
+--log-interval N           # Log every N steps (default: 10)
+```
+
+## Example Workflows
+
+### Basic Training
+
+```bash
+# Quick training test
+uv run python train_dart.py \
+    --dataset problem.csv \
+    --epochs 3 \
+    --batch-size 16
+
+# Production training
+uv run python train_dart.py \
+    --dataset problem.csv \
+    --epochs 50 \
+    --batch-size 32 \
+    --lr 1e-4 \
+    --checkpoint-dir ./checkpoints \
+    --save-interval 50
+```
+
+### Advanced Configuration
+
+```bash
+# Fine-tuning with custom noise schedule
+uv run python train_dart.py \
+    --dataset problem.csv \
+    --epochs 30 \
+    --initial-sigma 0.5 \
+    --final-sigma 0.001 \
+    --anneal-strategy exponential \
+    --beta 0.02
+
+# CPU-only training (slower)
+uv run python train_dart.py \
+    --dataset problem.csv \
+    --epochs 10 \
+    --device cpu \
+    --batch-size 8
+```
+
+## Project Structure
+
+```
+diffusion_dart/
+├── train_dart.py              # Main training entry point
+├── pyproject.toml             # UV package configuration
+├── problem.csv                # Chinese toxic content dataset
+│
+├── dart_system/               # Core implementation
+│   ├── embedding/             # Text → vector embedding
+│   ├── noise/                 # Diffusion noise generation
+│   ├── reconstruction/        # Vector → text reconstruction
+│   ├── toxicity/              # Toxicity classification
+│   ├── data/                  # Dataset loading
+│   ├── core/                  # Pipeline orchestration
+│   └── training/              # Training infrastructure
+│       ├── dart_trainer.py    # Main trainer
+│       ├── dataset.py         # Dataset wrapper
+│       ├── noise_scheduler.py # Sigma annealing
+│       ├── ppo_loss.py        # PPO loss function
+│       └── vec2text_wrapper.py # Reconstruction wrapper
+│
+└── tests/                     # Unit & integration tests
+    ├── test_data_loader.py
+    ├── test_embedding.py
+    ├── test_noise.py
+    ├── test_reconstruction.py
+    └── test_integration.py
 ```
 
 ## Configuration
 
-All dependencies are managed through `pyproject.toml`:
+Dependencies managed through `pyproject.toml`:
 
 ```toml
 [project]
+requires-python = ">=3.9,<3.10"
 dependencies = [
-    "torch>=2.0.0",
-    "transformers>=4.30.0",
-    "datasets>=2.12.0",
-    "accelerate>=0.20.0",
-    "numpy>=1.21.0",
-    "pandas>=1.5.0",
-    "scikit-learn>=1.3.0",
-    # ... other dependencies
+    "torch>=2.1.0,<2.2.0",      # PyTorch 2.1.x
+    "transformers>=4.36.0",      # Transformers 4.36+
+    "datasets==2.4.0",           # HuggingFace datasets
+    "accelerate>=0.20.0",        # Training acceleration
+    "numpy>=1.21.0,<2",          # Numerical operations
+    "pandas>=1.5.0",             # Data processing
+    "scikit-learn>=1.3.0",       # ML utilities
+    "tqdm>=4.65.0",              # Progress bars
 ]
 ```
 
-### uv Commands
+## Testing
 
 ```bash
-# Install/sync dependencies
-uv sync
+# Run all tests
+uv run pytest tests/
 
-# Add new dependencies  
-uv add torch transformers
+# Run specific test
+uv run pytest tests/test_embedding.py
 
-# Run with specific Python version
-uv run --python 3.11 python dart_main_complete.py
-
-# Development dependencies
-uv sync --dev
-```
-
-## Example Workflow
-
-```bash
-# 1. Validate system installation
-uv run python test_dart_simple.py
-
-# 2. Quick test on sample data
-uv run python dart_main_complete.py --mode test
-
-# 3. Run evaluation on your dataset
-uv run python dart_main_complete.py \
-    --mode evaluation \
-    --dataset problem.csv \
-    --sample-size 50 \
-    --output results/ \
-    --epsilon 0.05 \
-    --fp16
-
-# 4. Interactive testing of specific texts
-uv run python dart_main_complete.py --mode interactive
+# Integration test
+uv run pytest tests/test_integration.py -v
 ```
 
 ## Technical Specifications
 
-Following the research paper implementation:
+Following the DART research paper:
 
-- **Embedding Model**: `uer/sbert-base-chinese-nli` (768-dim)
-- **Vec2Text Model**: `uer/t5-base-chinese-cluecorpussmall`
-- **Perturbation**: Gaussian noise with ε=0.05 constraint
-- **Similarity Threshold**: Cosine similarity > 0.9
-- **Max Sequence Length**: 32 tokens (following paper)
-- **Batch Processing**: GPU-optimized with FP16 precision
+- **Embedding Model**: SBERT Chinese NLI (768-dim)
+- **Perturbation**: Gaussian noise with σ annealing
+- **Reconstruction**: Vec2text with heuristic fallback
+- **Optimization**: PPO with KL regularization
+- **Regularization**: β-weighted proximity loss
+- **Batch Processing**: GPU-optimized with mixed precision
 
 ## Safety & Ethics
 
 This implementation is designed for:
 - ✅ **Defensive Security Research**: Understanding LLM vulnerabilities
-- ✅ **Red-Team Evaluation**: Testing model safety mechanisms  
+- ✅ **Red-Team Evaluation**: Testing model safety mechanisms
 - ✅ **Academic Research**: Studying adversarial text generation
 - ❌ **Malicious Use**: Creating harmful content for attacks
 
@@ -205,17 +274,17 @@ The system focuses on detection and mitigation rather than exploitation.
 ## Development with uv
 
 ```bash
-# Install development dependencies
-uv sync --dev
+# Sync dependencies
+uv sync
 
-# Format code
-uv run black dart_system/
+# Add new dependency
+uv add package-name
 
-# Run type checking  
-uv run mypy dart_system/
+# Run with specific Python version
+uv run --python 3.9 python train_dart.py
 
-# Run tests
-uv run pytest tests/
+# Update dependencies
+uv lock --upgrade
 ```
 
 ## Troubleshooting
@@ -223,16 +292,24 @@ uv run pytest tests/
 ### Common Issues
 
 1. **CUDA/GPU Issues**: Use `--device cpu` to force CPU mode
-2. **Memory Issues**: Reduce `--batch-size` or use `--fp16`
+2. **Memory Issues**: Reduce `--batch-size`
 3. **Model Download**: First run downloads models from HuggingFace
 4. **Import Errors**: Run `uv sync` to ensure all dependencies
+5. **PyTorch Compatibility**: Requires PyTorch 2.1.x for Python 3.9
 
-### Fallback Mode
+### Checkpoint Management
 
-If HuggingFace models fail to load, the system automatically uses:
-- Unicode-based embedding (512-dim)  
-- Heuristic text reconstruction with synonym replacement
-- Rule-based toxicity classification
+```bash
+# Resume interrupted training
+uv run python train_dart.py \
+    --dataset problem.csv \
+    --resume checkpoints/interrupt_checkpoint.pt
+
+# Load specific checkpoint
+uv run python train_dart.py \
+    --dataset problem.csv \
+    --resume checkpoints/checkpoint_step_1000.pt
+```
 
 ## Citation
 
