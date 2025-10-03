@@ -6,13 +6,12 @@ This module provides:
 1. Chinese text embedding using uer/sbert-base-chinese-nli
 2. Embedding perturbation for DART attacks
 3. Semantic similarity checking
-4. Support for both HuggingFace models and fallback Unicode-based encoding
 
 Core components:
 - ChineseEmbeddingModel: SBERT-based embedding
 - EmbeddingPerturbation: Constrained perturbation system
 - SemanticSimilarityChecker: Cosine similarity validation
-- FallbackChineseEmbedding: Unicode-based backup implementation
+- ChineseEmbedding: Unified interface wrapper
 """
 
 import torch
@@ -23,12 +22,8 @@ import numpy as np
 from typing import List, Tuple, Optional, Union
 from dataclasses import dataclass
 
-try:
-    from transformers import AutoTokenizer, AutoModel
-    HF_AVAILABLE = True
-except ImportError:
-    HF_AVAILABLE = False
-    logging.warning("HuggingFace transformers not available, using fallback implementation")
+from transformers import AutoTokenizer, AutoModel
+HF_AVAILABLE = True
 
 logger = logging.getLogger(__name__)
 
@@ -279,328 +274,28 @@ class SemanticSimilarityChecker:
         return similarity >= self.similarity_threshold
 
 
-# Fallback implementation (rename existing class)
-class FallbackChineseEmbedding:
-    """
-    中文嵌入編碼器
-    
-    將中文文本轉換為固定維度的向量表示，
-    考慮字符的Unicode編碼和在文本中的位置。
-    """
-    
-    def __init__(self, config: Optional[EmbeddingConfig] = None):
-        """
-        初始化中文嵌入器
-        
-        Args:
-            config: 嵌入配置，如果為None則使用默認配置
-        """
-        self.config = config or EmbeddingConfig()
-        self.embedding_dim = self.config.embedding_dim
-        self.max_length = self.config.max_sequence_length
-        
-        logger.info(f"Initialized ChineseEmbedding with dim={self.embedding_dim}")
-    
+# Wrapper class - SBERT only, no fallback
+class ChineseEmbedding:
+    """Chinese embedding using SBERT model - requires transformers"""
+
+    def __init__(self, config: EmbeddingConfig):
+        self.config = config
+
+        if not HF_AVAILABLE:
+            raise ImportError(
+                "transformers library is required for ChineseEmbedding. "
+                "Install it with: uv add transformers"
+            )
+
+        # Use SBERT-based model only
+        self._embedder = ChineseEmbeddingModel(
+            model_name=config.model_name,
+            device=config.device,
+            max_length=config.max_sequence_length
+        )
+        logger.info(f"Using SBERT model: {config.model_name}")
+
     def encode(self, texts: List[str]) -> np.ndarray:
-        """
-        將文本列表編碼為嵌入向量列表
-
-        Args:
-            texts: 中文文本列表
-
-        Returns:
-            np.ndarray: 嵌入向量數組 [batch_size, embedding_dim]
-        """
-        logger.debug(f"Encoding {len(texts)} texts to embeddings")
-
-        embeddings = []
-        for text in texts:
-            embedding = self._text_to_embedding(text)
-            embeddings.append(embedding)
-
-        return np.array(embeddings, dtype=np.float32)
-    
-    def encode_single(self, text: str) -> List[float]:
-        """
-        編碼單個文本
-        
-        Args:
-            text: 中文文本
-            
-        Returns:
-            List[float]: 嵌入向量
-        """
-        return self._text_to_embedding(text)
-    
-    def _text_to_embedding(self, text: str) -> List[float]:
-        """
-        將單個中文文本轉換為嵌入向量
-        
-        核心算法:
-        1. 遍歷文本中的每個字符
-        2. 計算字符的Unicode編碼特徵
-        3. 應用位置權重衰減
-        4. 累加到向量的每個維度
-        5. L2正規化
-        
-        Args:
-            text: 中文文本
-            
-        Returns:
-            List[float]: 正規化後的嵌入向量
-        """
-        # 截斷過長的文本
-        chars = list(text)[:self.max_length]
-        
-        # 初始化零向量
-        embedding = [0.0] * self.embedding_dim
-        
-        # 遍歷每個字符
-        for char_idx, char in enumerate(chars):
-            # 獲取字符的Unicode編碼
-            char_code = ord(char)
-            
-            # 計算位置權重（位置越靠後權重越小）
-            position_weight = self._calculate_position_weight(char_idx)
-            
-            # 為每個維度計算特徵值
-            for dim_idx in range(self.embedding_dim):
-                # 基於字符編碼和維度索引生成特徵
-                feature_value = self._calculate_feature(char_code, dim_idx)
-                # 累加加權特徵到對應維度
-                embedding[dim_idx] += feature_value * position_weight
-        
-        # L2正規化
-        if self.config.normalization:
-            embedding = self._normalize_vector(embedding)
-        
-        return embedding
-    
-    def _calculate_position_weight(self, position: int) -> float:
-        """
-        計算位置權重
-        
-        使用平方根衰減: 1 / sqrt(position + 1)
-        
-        Args:
-            position: 字符在文本中的位置（從0開始）
-            
-        Returns:
-            float: 位置權重值
-        """
-        return 1.0 / ((position + 1) ** self.config.position_decay_factor)
-    
-    def _calculate_feature(self, char_code: int, dim_idx: int) -> float:
-        """
-        計算字符在特定維度的特徵值
-        
-        算法: ((char_code + dim_idx * multiplier) % offset) / offset
-        
-        Args:
-            char_code: 字符的Unicode編碼
-            dim_idx: 維度索引
-            
-        Returns:
-            float: 特徵值 (0-1之間)
-        """
-        multiplier = self.config.encoding_multiplier
-        offset = self.config.unicode_offset
-        
-        # 計算特徵值，確保在0-1範圍內
-        feature = ((char_code + dim_idx * multiplier) % offset) / offset
-        return feature
-    
-    def _normalize_vector(self, vector: List[float]) -> List[float]:
-        """
-        L2正規化向量
-        
-        將向量標準化為單位向量: v_norm = v / ||v||_2
-        
-        Args:
-            vector: 原始向量
-            
-        Returns:
-            List[float]: 正規化後的向量
-        """
-        # 計算L2範數
-        l2_norm = math.sqrt(sum(x * x for x in vector))
-        
-        # 避免除零錯誤
-        if l2_norm == 0.0:
-            return vector
-        
-        # 正規化
-        return [x / l2_norm for x in vector]
-    
-    def compute_similarity(self, vec1: List[float], vec2: List[float]) -> float:
-        """
-        計算兩個向量的餘弦相似度
-        
-        公式: cos(θ) = (v1 · v2) / (||v1|| * ||v2||)
-        
-        Args:
-            vec1: 第一個向量
-            vec2: 第二個向量
-            
-        Returns:
-            float: 餘弦相似度值 (-1 到 1)
-        """
-        if len(vec1) != len(vec2):
-            raise ValueError(f"Vector dimensions mismatch: {len(vec1)} vs {len(vec2)}")
-        
-        # 計算點積
-        dot_product = sum(a * b for a, b in zip(vec1, vec2))
-        
-        # 計算向量的模長
-        norm1 = math.sqrt(sum(x * x for x in vec1))
-        norm2 = math.sqrt(sum(x * x for x in vec2))
-        
-        # 避免除零錯誤
-        if norm1 == 0.0 or norm2 == 0.0:
-            return 0.0
-        
-        # 餘弦相似度
-        similarity = dot_product / (norm1 * norm2)
-        return similarity
-    
-    def compute_l2_distance(self, vec1: List[float], vec2: List[float]) -> float:
-        """
-        計算兩個向量的L2距離
-        
-        公式: ||v1 - v2||_2 = sqrt(sum((v1_i - v2_i)^2))
-        
-        Args:
-            vec1: 第一個向量
-            vec2: 第二個向量
-            
-        Returns:
-            float: L2距離
-        """
-        if len(vec1) != len(vec2):
-            raise ValueError(f"Vector dimensions mismatch: {len(vec1)} vs {len(vec2)}")
-        
-        # 計算平方差的和
-        squared_diff_sum = sum((a - b) ** 2 for a, b in zip(vec1, vec2))
-        
-        # 返回平方根
-        return math.sqrt(squared_diff_sum)
-    
-    def batch_similarity(self, embeddings: List[List[float]]) -> List[List[float]]:
-        """
-        計算一批嵌入向量之間的相似度矩陣
-        
-        Args:
-            embeddings: 嵌入向量列表
-            
-        Returns:
-            List[List[float]]: 相似度矩陣
-        """
-        n = len(embeddings)
-        similarity_matrix = []
-        
-        for i in range(n):
-            row = []
-            for j in range(n):
-                if i == j:
-                    row.append(1.0)  # 自己與自己的相似度為1
-                else:
-                    sim = self.compute_similarity(embeddings[i], embeddings[j])
-                    row.append(sim)
-            similarity_matrix.append(row)
-        
-        return similarity_matrix
-    
-    def get_embedding_statistics(self, embeddings: List[List[float]]) -> dict:
-        """
-        計算嵌入向量的統計信息
-        
-        Args:
-            embeddings: 嵌入向量列表
-            
-        Returns:
-            dict: 統計信息
-        """
-        if not embeddings:
-            return {}
-        
-        # 計算每個維度的統計信息
-        dim_means = []
-        dim_stds = []
-        
-        for dim in range(len(embeddings[0])):
-            values = [emb[dim] for emb in embeddings]
-            mean_val = sum(values) / len(values)
-            variance = sum((x - mean_val) ** 2 for x in values) / len(values)
-            std_val = math.sqrt(variance)
-            
-            dim_means.append(mean_val)
-            dim_stds.append(std_val)
-        
-        # 計算向量長度統計
-        norms = [math.sqrt(sum(x * x for x in emb)) for emb in embeddings]
-        
-        return {
-            "num_vectors": len(embeddings),
-            "vector_dim": len(embeddings[0]),
-            "mean_norm": sum(norms) / len(norms),
-            "std_norm": math.sqrt(sum((x - sum(norms)/len(norms)) ** 2 for x in norms) / len(norms)),
-            "min_norm": min(norms),
-            "max_norm": max(norms),
-            "dim_mean_avg": sum(dim_means) / len(dim_means),
-            "dim_std_avg": sum(dim_stds) / len(dim_stds)
-        }
-
-
-# 測試和示例函數
-def test_chinese_embedding():
-    """測試中文嵌入功能"""
-    # 創建嵌入器
-    config = EmbeddingConfig(embedding_dim=128, max_sequence_length=50)
-    embedder = ChineseEmbedding(config)
-    
-    # 測試文本
-    test_texts = [
-        "如何利用社會偏見來操控他人？",
-        "請解釋機器學習的基本概念",
-        "台灣有哪些著名的觀光景點？",
-        "如何提升個人的溝通技巧？"
-    ]
-    
-    print("=== 中文嵌入測試 ===")
-    
-    # 編碼測試
-    embeddings = embedder.encode(test_texts)
-    print(f"編碼 {len(test_texts)} 個文本為 {len(embeddings[0])} 維向量")
-    
-    # 相似度測試
-    print("\n相似度矩陣:")
-    sim_matrix = embedder.batch_similarity(embeddings)
-    for i, row in enumerate(sim_matrix):
-        print(f"文本 {i+1}: {[f'{sim:.3f}' for sim in row]}")
-    
-    # 統計信息
-    stats = embedder.get_embedding_statistics(embeddings)
-    print(f"\n嵌入統計信息:")
-    for key, value in stats.items():
-        print(f"  {key}: {value:.4f}" if isinstance(value, float) else f"  {key}: {value}")
-    
-    # 單對單相似度測試
-    print(f"\n文本1與文本2相似度: {embedder.compute_similarity(embeddings[0], embeddings[1]):.4f}")
-    print(f"文本1與文本3相似度: {embedder.compute_similarity(embeddings[0], embeddings[2]):.4f}")
-    
-    # L2距離測試
-    print(f"文本1與文本2 L2距離: {embedder.compute_l2_distance(embeddings[0], embeddings[1]):.4f}")
-
-
-# Create unified interface - prefer torch implementation, fallback to pure Python
-try:
-    # Try to use torch-based implementation first
-    if HF_AVAILABLE:
-        ChineseEmbedding = FallbackChineseEmbedding  # Use fallback for now, can switch to ChineseEmbeddingModel when ready
-    else:
-        ChineseEmbedding = FallbackChineseEmbedding
-except:
-    ChineseEmbedding = FallbackChineseEmbedding
-
-if __name__ == "__main__":
-    test_chinese_embedding()
+        """Encode texts to embeddings (numpy array)"""
+        embeddings = self._embedder.embed_texts(texts)
+        return embeddings.cpu().numpy()
