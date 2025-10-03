@@ -19,6 +19,7 @@ import torch
 import torch.nn as nn
 import math
 import logging
+import numpy as np
 from typing import List, Tuple, Optional, Union
 from dataclasses import dataclass
 
@@ -300,24 +301,24 @@ class FallbackChineseEmbedding:
         
         logger.info(f"Initialized ChineseEmbedding with dim={self.embedding_dim}")
     
-    def encode(self, texts: List[str]) -> List[List[float]]:
+    def encode(self, texts: List[str]) -> np.ndarray:
         """
         將文本列表編碼為嵌入向量列表
-        
+
         Args:
             texts: 中文文本列表
-            
+
         Returns:
-            List[List[float]]: 嵌入向量列表，每個向量維度為embedding_dim
+            np.ndarray: 嵌入向量數組 [batch_size, embedding_dim]
         """
         logger.debug(f"Encoding {len(texts)} texts to embeddings")
-        
+
         embeddings = []
         for text in texts:
             embedding = self._text_to_embedding(text)
             embeddings.append(embedding)
-        
-        return embeddings
+
+        return np.array(embeddings, dtype=np.float32)
     
     def encode_single(self, text: str) -> List[float]:
         """
