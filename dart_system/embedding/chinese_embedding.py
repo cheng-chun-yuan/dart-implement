@@ -1,14 +1,14 @@
 """
-Chinese Embedding Model - SBERT-based Chinese NLI
+Chinese Embedding Model - ME5 Inverter
 Implementation following technical documentation
 
 This module provides:
-1. Chinese text embedding using uer/sbert-base-chinese-nli
+1. Chinese text embedding using yiyic/t5_me5_base_nq_32_inverter
 2. Embedding perturbation for DART attacks
 3. Semantic similarity checking
 
 Core components:
-- ChineseEmbeddingModel: SBERT-based embedding
+- ChineseEmbeddingModel: ME5 inverter-based embedding
 - EmbeddingPerturbation: Constrained perturbation system
 - SemanticSimilarityChecker: Cosine similarity validation
 - ChineseEmbedding: Unified interface wrapper
@@ -30,34 +30,34 @@ logger = logging.getLogger(__name__)
 @dataclass
 class EmbeddingConfig:
     """Embedding model configuration"""
-    embedding_dim: int = 512
-    max_sequence_length: int = 32  # Following technical doc
+    embedding_dim: int = 768  # SBERT uses 768-dim embeddings
+    max_sequence_length: int = 32  # Matching technical doc specification
     position_decay_factor: float = 0.5
     normalization: bool = True
     encoding_multiplier: int = 31
     unicode_offset: int = 1000
-    model_name: str = "uer/sbert-base-chinese-nli"
+    model_name: str = "uer/sbert-base-chinese-nli"  # SBERT Chinese NLI model (verified working)
     device: Optional[str] = None
     similarity_threshold: float = 0.9
 
 
 class ChineseEmbeddingModel:
     """
-    Chinese embedding model using uer/sbert-base-chinese-nli
+    Chinese embedding model using yiyic/t5_me5_base_nq_32_inverter
     Following technical documentation specifications
     """
-    
+
     def __init__(
         self,
         model_name: str = "uer/sbert-base-chinese-nli",
         device: Optional[str] = None,
-        max_length: int = 32
+        max_length: int = 512
     ):
         """
         Initialize Chinese SBERT embedding model
-        
+
         Args:
-            model_name: HuggingFace model name for Chinese SBERT
+            model_name: HuggingFace model name for SBERT Chinese
             device: Device to run model on (auto-detect if None)
             max_length: Maximum token length for input text
         """
@@ -66,7 +66,7 @@ class ChineseEmbeddingModel:
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
         
         if not HF_AVAILABLE:
-            raise ImportError("HuggingFace transformers required for SBERT model")
+            raise ImportError("HuggingFace transformers required for ME5 inverter model")
         
         logger.info(f"Loading Chinese embedding model: {model_name}")
         logger.info(f"Using device: {self.device}")
@@ -274,9 +274,9 @@ class SemanticSimilarityChecker:
         return similarity >= self.similarity_threshold
 
 
-# Wrapper class - SBERT only, no fallback
+# Wrapper class - ME5 inverter only, no fallback
 class ChineseEmbedding:
-    """Chinese embedding using SBERT model - requires transformers"""
+    """Chinese embedding using ME5 inverter model - requires transformers"""
 
     def __init__(self, config: EmbeddingConfig):
         self.config = config
@@ -287,13 +287,13 @@ class ChineseEmbedding:
                 "Install it with: uv add transformers"
             )
 
-        # Use SBERT-based model only
+        # Use ME5 inverter model only
         self._embedder = ChineseEmbeddingModel(
             model_name=config.model_name,
             device=config.device,
             max_length=config.max_sequence_length
         )
-        logger.info(f"Using SBERT model: {config.model_name}")
+        logger.info(f"Using ME5 inverter model: {config.model_name}")
 
     def encode(self, texts: List[str]) -> np.ndarray:
         """Encode texts to embeddings (numpy array)"""

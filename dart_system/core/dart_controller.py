@@ -30,7 +30,7 @@ sys.path.append(os.path.dirname(os.path.dirname(__file__)))
 from data.data_loader import ChineseDataLoader
 from embedding.chinese_embedding import ChineseEmbedding, EmbeddingConfig
 from noise.diffusion_noise import DiffusionNoise, NoiseConfig
-from reconstruction.vec2text import ChineseVec2Text, ReconstructionConfig
+from reconstruction.vec2text import ChineseVec2TextModel, ReconstructionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -114,12 +114,14 @@ class DARTController:
         self.noise_generator = DiffusionNoise(noise_config)
         
         # 文本重建器
-        reconstruction_config = ReconstructionConfig(
-            synonym_prob=self.config.synonym_prob,
-            structure_prob=self.config.structure_prob,
-            max_changes_per_text=self.config.max_changes_per_text
+        reconstruction_config = ReconstructionConfig()
+        self.reconstructor = ChineseVec2TextModel(
+            inverter_model=reconstruction_config.inverter_model,
+            corrector_model=reconstruction_config.corrector_model,
+            device=reconstruction_config.device,
+            max_length=reconstruction_config.max_length,
+            num_steps=reconstruction_config.num_steps
         )
-        self.reconstructor = ChineseVec2Text(reconstruction_config)
         
         logger.info("All modules initialized")
     

@@ -9,7 +9,7 @@ import torch
 import torch.nn as nn
 import logging
 from typing import List, Union
-from dart_system.reconstruction.vec2text import ChineseVec2Text, ReconstructionConfig
+from dart_system.reconstruction.vec2text import ChineseVec2TextModel, ReconstructionConfig
 
 logger = logging.getLogger(__name__)
 
@@ -45,7 +45,13 @@ class Vec2TextWrapper(nn.Module):
         self.reconstruction_config = reconstruction_config or ReconstructionConfig()
 
         # Initialize reconstruction model
-        self.vec2text_model = ChineseVec2Text(self.reconstruction_config)
+        self.vec2text_model = ChineseVec2TextModel(
+            inverter_model=self.reconstruction_config.inverter_model,
+            corrector_model=self.reconstruction_config.corrector_model,
+            device=device,
+            max_length=self.reconstruction_config.max_length,
+            num_steps=self.reconstruction_config.num_steps
+        )
 
         logger.info("Initialized Vec2Text wrapper for DART training")
 
@@ -69,16 +75,11 @@ class Vec2TextWrapper(nn.Module):
         Returns:
             List[str]: Reconstructed prompts P_mod
         """
-        # Convert torch tensor to list of lists for compatibility
-        if isinstance(embeddings, torch.Tensor):
-            embeddings_list = embeddings.cpu().detach().tolist()
-        else:
-            embeddings_list = embeddings
-
-        # Use vec2text decoder to reconstruct
-        reconstructed_prompts = self.vec2text_model.decode(
-            perturbed_embeddings=embeddings_list,
-            original_texts=original_prompts
+        # Use batch_embedding_to_text for reconstruction
+        reconstructed_prompts = self.vec2text_model.batch_embedding_to_text(
+            embeddings,
+            num_steps=self.reconstruction_config.num_steps,
+            temperature=self.reconstruction_config.temperature
         )
 
         return reconstructed_prompts

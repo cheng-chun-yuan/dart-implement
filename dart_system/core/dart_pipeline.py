@@ -27,12 +27,10 @@ import time
 # Import DART system components
 try:
     from ..embedding.chinese_embedding import (
-        ChineseEmbeddingModel, EmbeddingPerturbation, SemanticSimilarityChecker,
-        FallbackChineseEmbedding, HF_AVAILABLE
+        ChineseEmbeddingModel, EmbeddingPerturbation, SemanticSimilarityChecker
     )
     from ..reconstruction.vec2text import (
-        ChineseVec2TextModel, IterativeRefinement, TextSimilarityValidator,
-        FallbackVec2Text, HF_AVAILABLE as VEC2TEXT_HF_AVAILABLE
+        ChineseVec2TextModel, IterativeRefinement, TextSimilarityValidator
     )
     from ..toxicity.chinese_classifier import (
         ChineseToxicityClassifier, ToxicityScorer, ToxicityResult
@@ -179,35 +177,23 @@ class DARTInferencePipeline:
                 raise ImportError("HuggingFace not available")
         
         except Exception as e:
-            logger.warning(f"Failed to load HF embedding model: {e}")
-            if self.config.use_fallback_on_error:
-                self.embedding_model = FallbackChineseEmbedding(
-                    embedding_dim=self.config.fallback_embedding_dim
-                )
-                logger.info("Initialized fallback Chinese embedding model")
-            else:
-                raise
+            logger.error(f"Failed to load HF embedding model: {e}")
+            raise RuntimeError("HuggingFace transformers required. Install with: uv add transformers")
     
     def _initialize_vec2text_model(self):
         """Initialize vec2text model"""
         try:
-            if VEC2TEXT_HF_AVAILABLE and hasattr(self.embedding_model, 'get_embedding_dim'):
-                self.vec2text_model = ChineseVec2TextModel(
-                    model_name=self.config.vec2text_model,
-                    device=self.device,
-                    max_length=self.config.max_length * 2  # Allow longer reconstruction
-                )
-                logger.info("Initialized HuggingFace Chinese vec2text model")
-            else:
-                raise ImportError("HuggingFace not available or incompatible embedding model")
-        
+            self.vec2text_model = ChineseVec2TextModel(
+                inverter_model="yiyic/t5_me5_base_nq_32_inverter",
+                corrector_model="yiyic/t5_me5_base_nq_32_corrector",
+                device=self.device,
+                max_length=self.config.max_length * 2  # Allow longer reconstruction
+            )
+            logger.info("Initialized HuggingFace Chinese vec2text model")
+
         except Exception as e:
-            logger.warning(f"Failed to load HF vec2text model: {e}")
-            if self.config.use_fallback_on_error:
-                self.vec2text_model = FallbackVec2Text()
-                logger.info("Initialized fallback Chinese vec2text model")
-            else:
-                raise
+            logger.error(f"Failed to load HF vec2text model: {e}")
+            raise RuntimeError("HuggingFace transformers required. Install with: uv add transformers")
     
     def _initialize_toxicity_classifier(self):
         """Initialize toxicity classifier"""
@@ -238,22 +224,8 @@ class DARTInferencePipeline:
     
     def _initialize_fallback_components(self):
         """Initialize fallback components when HF models fail"""
-        logger.info("Initializing complete fallback system...")
-        
-        # Fallback embedding
-        self.embedding_model = FallbackChineseEmbedding(
-            embedding_dim=self.config.fallback_embedding_dim
-        )
-        
-        # Fallback vec2text
-        self.vec2text_model = FallbackVec2Text()
-        
-        # Toxicity classifier (always available)
-        if self.config.enable_toxicity_scoring:
-            self.toxicity_classifier = ChineseToxicityClassifier()
-            self.toxicity_scorer = ToxicityScorer(self.toxicity_classifier)
-        
-        # Auxiliary components
+        logger.error("Fallback components no longer available. HuggingFace transformers required.")
+        raise RuntimeError("HuggingFace transformers required. Install with: uv add transformers")
         self.perturbation = EmbeddingPerturbation(
             embedding_dim=self.config.fallback_embedding_dim,
             device="cpu"  # Fallback to CPU

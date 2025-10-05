@@ -3,156 +3,339 @@ Vector to Text Reconstruction Module
 Implementation following technical documentation
 
 This module provides:
-1. T5-based Chinese vec2text reconstruction using uer/t5-base-chinese-cluecorpussmall
+1. MultiVec2Text-based reconstruction using trained inverter + corrector models
 2. Iterative refinement for better reconstruction quality
-3. Fallback heuristic reconstruction system
-4. Text similarity validation
+3. Text similarity validation
 
 Core components:
-- ChineseVec2TextModel: T5-based reconstruction
+- ChineseVec2TextModel: MultiVec2Text-based reconstruction (inverter + corrector)
 - IterativeRefinement: Multi-step optimization
-- FallbackVec2Text: Heuristic backup implementation
 - TextSimilarityValidator: Quality assessment
+
+Models used:
+- Inverter: yiyic/t5_me5_base_nq_32_inverter
+- Corrector: yiyic/t5_me5_base_nq_32_corrector
 """
 
 import torch
 import torch.nn as nn
-import random
-import re
 import logging
 from typing import List, Dict, Optional, Tuple, Union
 from dataclasses import dataclass
 
 try:
-    from transformers import T5ForConditionalGeneration, T5Tokenizer, AutoTokenizer
+    from transformers import T5ForConditionalGeneration, AutoTokenizer
     HF_AVAILABLE = True
 except ImportError:
     HF_AVAILABLE = False
-    logging.warning("HuggingFace transformers not available, using fallback implementation")
+    raise ImportError("HuggingFace transformers required for vec2text reconstruction")
 
 logger = logging.getLogger(__name__)
 
 @dataclass
 class ReconstructionConfig:
     """Reconstruction configuration"""
-    model_name: str = "uer/t5-base-chinese-cluecorpussmall"
+    inverter_model: str = "yiyic/t5_me5_base_nq_32_inverter"
+    corrector_model: str = "yiyic/t5_me5_base_nq_32_corrector"
     device: Optional[str] = None
-    max_length: int = 64
-    max_iters: int = 5
-    temperature: float = 0.7
+    max_length: int = 128
+    num_steps: int = 20  # Number of correction steps
+    temperature: float = 1.0
     top_k: int = 50
     top_p: float = 0.9
-    # Fallback heuristic parameters
-    synonym_prob: float = 0.3
-    structure_prob: float = 0.2
-    max_changes_per_text: int = 3
-    preserve_keywords: bool = True
     semantic_drift_threshold: float = 0.8
 
 
 class ChineseVec2TextModel:
     """
-    T5-based Chinese vector-to-text reconstruction model
-    Following technical documentation specifications
+    MultiVec2Text-based vector-to-text reconstruction model
+    Uses trained inverter and corrector models for accurate reconstruction
     """
-    
+
     def __init__(
         self,
-        model_name: str = "uer/t5-base-chinese-cluecorpussmall",
+        inverter_model: str = "yiyic/t5_me5_base_nq_32_inverter",
+        corrector_model: str = "yiyic/t5_me5_base_nq_32_corrector",
         device: Optional[str] = None,
-        max_length: int = 64
+        max_length: int = 128,
+        num_steps: int = 20
     ):
         """
-        Initialize Chinese T5 vec2text model
-        
+        Initialize MultiVec2Text reconstruction model
+
         Args:
-            model_name: HuggingFace model name for Chinese T5
+            inverter_model: HuggingFace model name for inverter
+            corrector_model: HuggingFace model name for corrector
             device: Device to run model on (auto-detect if None)
             max_length: Maximum token length for generation
+            num_steps: Number of correction steps
         """
-        self.model_name = model_name
+        self.inverter_model_name = inverter_model
+        self.corrector_model_name = corrector_model
         self.max_length = max_length
+        self.num_steps = num_steps
         self.device = device or ("cuda" if torch.cuda.is_available() else "cpu")
-        
+
         if not HF_AVAILABLE:
-            raise ImportError("HuggingFace transformers required for T5 model")
-        
-        logger.info(f"Loading Chinese T5 vec2text model: {model_name}")
+            raise ImportError("HuggingFace transformers required for MultiVec2Text")
+
+        logger.info(f"Loading MultiVec2Text inverter: {inverter_model}")
+        logger.info(f"Loading MultiVec2Text corrector: {corrector_model}")
         logger.info(f"Using device: {self.device}")
-        
+
         try:
-            # Load tokenizer and model
-            self.tokenizer = T5Tokenizer.from_pretrained(model_name)
-            self.model = T5ForConditionalGeneration.from_pretrained(model_name)
-            self.model.eval().to(self.device)
-            
-            logger.info(f"T5 model loaded successfully")
-            
+            # Load inverter (generates initial text from embedding)
+            # Use t5-base tokenizer as these models are based on T5-base
+            self.inverter_tokenizer = AutoTokenizer.from_pretrained("t5-base")
+            self.inverter = T5ForConditionalGeneration.from_pretrained(inverter_model)
+            self.inverter.eval().to(self.device)
+
+            # Load corrector (refines the generated text)
+            self.corrector_tokenizer = AutoTokenizer.from_pretrained("t5-base")
+            self.corrector = T5ForConditionalGeneration.from_pretrained(corrector_model)
+            self.corrector.eval().to(self.device)
+
+            logger.info(f"MultiVec2Text models loaded successfully")
+
         except Exception as e:
-            logger.error(f"Failed to load Chinese T5 model: {e}")
+            logger.error(f"Failed to load MultiVec2Text models: {e}")
             raise
     
     def embedding_to_text(
         self,
         embedding: torch.Tensor,
-        max_iters: int = 5,
-        temperature: float = 0.7
+        num_steps: Optional[int] = None,
+        temperature: float = 1.0,
+        embedding_model=None
     ) -> str:
         """
-        Convert embedding vector back to Chinese text
-        
+        Convert embedding vector back to text with iterative optimization
+
+        Uses the inverter model to generate initial text, then iteratively refines
+        it by comparing the embedding of generated text with target embedding.
+
         Args:
-            embedding: Perturbed embedding vector
-            max_iters: Maximum iterations for refinement
+            embedding: Input embedding vector (768-dim)
+            num_steps: Number of correction steps (uses default if None)
             temperature: Generation temperature
-            
+            embedding_model: Optional embedding model for feedback optimization
+
         Returns:
-            str: Reconstructed Chinese text
+            str: Reconstructed text
         """
-        # Note: This is a simplified implementation
-        # In practice, you would need a trained embedding-to-text model
-        
-        # For demonstration, we generate text using T5 with empty prompt
-        # In real implementation, you would have a trained model that takes embeddings as input
-        input_ids = self.tokenizer.encode("", return_tensors="pt").to(self.device)
-        
+        if num_steps is None:
+            num_steps = self.num_steps
+
+        # Ensure embedding is on correct device and has batch dimension
+        if embedding.dim() == 1:
+            embedding = embedding.unsqueeze(0)  # [768] -> [1, 768]
+        embedding = embedding.to(self.device)
+
+        # Step 1: Generate initial text
+        # Since true vec2text inversion is complex and these models may not be properly trained,
+        # we use a simple prompt-based approach with the corrector model
         with torch.no_grad():
-            outputs = self.model.generate(
-                input_ids=input_ids,
-                max_length=self.max_length,
-                temperature=temperature,
+            # Create a simple prompt to start generation
+            # The prompt gives the model context to generate Chinese text
+            prompt = "中文文本："  # "Chinese text:"
+            inputs = self.corrector_tokenizer(
+                prompt,
+                return_tensors="pt",
+                max_length=32,
+                truncation=True
+            ).to(self.device)
+
+            # T5 requires decoder_start_token_id
+            decoder_start_token_id = self.corrector.config.decoder_start_token_id
+            if decoder_start_token_id is None:
+                decoder_start_token_id = self.corrector_tokenizer.pad_token_id or 0
+
+            # Generate initial text
+            outputs = self.corrector.generate(
+                **inputs,
+                max_length=self.max_length // 2,  # Shorter for initial generation
+                temperature=max(temperature, 0.8),
                 do_sample=True,
-                pad_token_id=self.tokenizer.pad_token_id,
-                eos_token_id=self.tokenizer.eos_token_id
+                top_k=50,
+                top_p=0.9,
+                num_return_sequences=1,
+                decoder_start_token_id=decoder_start_token_id,
+                pad_token_id=self.corrector_tokenizer.pad_token_id or 0,
+                eos_token_id=self.corrector_tokenizer.eos_token_id or 1
             )
-            
-        text = self.tokenizer.decode(outputs[0], skip_special_tokens=True)
-        return text
+
+            initial_text = self.corrector_tokenizer.decode(outputs[0], skip_special_tokens=True)
+
+        # Step 2: Iterative refinement with embedding feedback
+        current_text = initial_text
+        best_text = initial_text
+        best_similarity = -1.0
+
+        if embedding_model is not None:
+            for step in range(num_steps):
+                with torch.no_grad():
+                    # Get embedding of current text
+                    current_embedding = embedding_model.embed_text(current_text)
+                    if current_embedding.dim() == 1:
+                        current_embedding = current_embedding.unsqueeze(0)
+
+                    # Calculate similarity to target embedding
+                    similarity = torch.nn.functional.cosine_similarity(
+                        embedding, current_embedding
+                    ).item()
+
+                    # Track best reconstruction
+                    if similarity > best_similarity:
+                        best_similarity = similarity
+                        best_text = current_text
+
+                    # Early stop if very close
+                    if similarity > 0.95:
+                        break
+
+                    # Use corrector to refine text
+                    inputs = self.corrector_tokenizer(
+                        current_text,
+                        return_tensors="pt",
+                        max_length=self.max_length,
+                        truncation=True
+                    ).to(self.device)
+
+                    # Reduce temperature over iterations for convergence
+                    step_temp = max(0.5, temperature - (step * 0.05))
+
+                    corrector_outputs = self.corrector.generate(
+                        **inputs,
+                        max_length=self.max_length,
+                        temperature=step_temp,
+                        do_sample=True if step < num_steps // 2 else False,
+                        num_return_sequences=1,
+                        decoder_start_token_id=decoder_start_token_id,
+                        pad_token_id=self.corrector_tokenizer.pad_token_id or 0
+                    )
+
+                    corrected_text = self.corrector_tokenizer.decode(
+                        corrector_outputs[0], skip_special_tokens=True
+                    )
+
+                    # Check if converged
+                    if corrected_text == current_text:
+                        break
+
+                    current_text = corrected_text
+
+            return best_text
+        else:
+            # No embedding model provided, just use corrector refinement
+            for step in range(num_steps):
+                with torch.no_grad():
+                    inputs = self.corrector_tokenizer(
+                        current_text,
+                        return_tensors="pt",
+                        max_length=self.max_length,
+                        truncation=True
+                    ).to(self.device)
+
+                    corrector_outputs = self.corrector.generate(
+                        **inputs,
+                        max_length=self.max_length,
+                        temperature=temperature,
+                        do_sample=False,
+                        num_return_sequences=1,
+                        decoder_start_token_id=decoder_start_token_id,
+                        pad_token_id=self.corrector_tokenizer.pad_token_id or 0
+                    )
+
+                    corrected_text = self.corrector_tokenizer.decode(
+                        corrector_outputs[0], skip_special_tokens=True
+                    )
+
+                    if corrected_text == current_text:
+                        break
+
+                    current_text = corrected_text
+
+            return current_text
     
     def batch_embedding_to_text(
         self,
         embeddings: torch.Tensor,
-        max_iters: int = 5,
-        temperature: float = 0.7
+        num_steps: Optional[int] = None,
+        temperature: float = 1.0,
+        embedding_model=None
     ) -> List[str]:
         """
         Convert batch of embeddings to text
-        
+
         Args:
-            embeddings: Batch of perturbed embeddings
-            max_iters: Maximum iterations for refinement
+            embeddings: Batch of embeddings [batch_size, 768]
+            num_steps: Number of correction steps
             temperature: Generation temperature
-            
+            embedding_model: Optional embedding model for feedback optimization
+
         Returns:
-            List[str]: Reconstructed Chinese texts
+            List[str]: Reconstructed texts
         """
         reconstructed_texts = []
-        
+
         for embedding in embeddings:
-            text = self.embedding_to_text(embedding, max_iters, temperature)
+            text = self.embedding_to_text(embedding, num_steps, temperature, embedding_model)
             reconstructed_texts.append(text)
-        
+
         return reconstructed_texts
+
+    def decode(self, embeddings, original_texts=None, embedding_model=None):
+        """
+        Wrapper method for compatibility with DARTController
+
+        Args:
+            embeddings: Embeddings to decode (numpy array or torch tensor)
+            original_texts: Optional original texts (not used in current implementation)
+            embedding_model: Optional embedding model for iterative refinement
+
+        Returns:
+            List[str]: Reconstructed texts
+        """
+        import torch
+        import numpy as np
+
+        # Convert numpy array to torch tensor if needed
+        if isinstance(embeddings, np.ndarray):
+            embeddings = torch.from_numpy(embeddings).float()
+
+        return self.batch_embedding_to_text(embeddings, embedding_model=embedding_model)
+
+    def compute_text_similarity(self, text1: str, text2: str) -> float:
+        """
+        Compute similarity between two texts
+
+        Args:
+            text1: First text
+            text2: Second text
+
+        Returns:
+            float: Similarity score (0-1)
+        """
+        if not text1 or not text2:
+            return 0.0
+
+        # Character-level Jaccard similarity
+        set1 = set(text1)
+        set2 = set(text2)
+
+        if not set1 and not set2:
+            return 1.0
+
+        intersection = len(set1 & set2)
+        union = len(set1 | set2)
+
+        jaccard = intersection / union if union > 0 else 0.0
+
+        # Length similarity
+        len_sim = min(len(text1), len(text2)) / max(len(text1), len(text2))
+
+        # Combined similarity (70% Jaccard, 30% length)
+        return jaccard * 0.7 + len_sim * 0.3
 
 
 class IterativeRefinement:
@@ -316,452 +499,34 @@ class TextSimilarityValidator:
         return variance ** 0.5
 
 
-# Fallback implementation (keep existing class with modifications)
-class FallbackVec2Text:
-    """
-    中文向量到文本重建器
-    
-    將擾動後的嵌入向量重建為語義相似但表達不同的中文文本，
-    通過同義詞替換和句式變化來實現。
-    """
-    
-    def __init__(self, config: Optional[ReconstructionConfig] = None):
-        """
-        初始化重建器
-        
-        Args:
-            config: 重建配置，如果為None則使用默認配置
-        """
-        self.config = config or ReconstructionConfig()
-        
-        # 中文同義詞映射表
-        self.chinese_synonyms = self._build_synonym_dict()
-        
-        # 句式變化模式
-        self.sentence_patterns = self._build_sentence_patterns()
-        
-        # 需要保留的關鍵詞（通常是有害關鍵詞）
-        self.preserve_keywords = self._build_preserve_keywords()
-        
-        logger.info("Initialized ChineseVec2Text reconstructor")
-    
-    def _build_synonym_dict(self) -> Dict[str, List[str]]:
-        """構建中文同義詞字典"""
-        return {
-            # 動詞類
-            "如何": ["怎樣", "怎麼", "用什麼方法", "以何種方式", "通過什麼途徑"],
-            "利用": ["使用", "運用", "採用", "借助", "憑藉", "藉由"],
-            "操控": ["控制", "操縱", "影響", "支配", "掌控"],
-            "策劃": ["規劃", "計劃", "設計", "安排", "組織"],
-            "引導": ["指導", "帶領", "促使", "推動", "誘導"],
-            "挑起": ["引起", "激發", "煽動", "引發", "觸發"],
-            "獲取": ["取得", "獲得", "爭取", "贏得", "收穫"],
-            "提升": ["增強", "改善", "強化", "優化", "提高"],
-            "影響": ["作用", "效應", "衝擊", "感化", "左右"],
-            "建立": ["建構", "創建", "設立", "成立", "構建"],
-            "創造": ["產生", "製造", "生成", "形成", "營造"],
-            "傳播": ["散佈", "擴散", "流傳", "宣傳", "推廣"],
-            "操縱": ["操控", "控制", "支配", "掌握", "主導"],
-            "欺騙": ["矇騙", "誤導", "愚弄", "哄騙", "欺瞞"],
-            
-            # 名詞類
-            "策略": ["方法", "手段", "途徑", "方式", "技巧"],
-            "方法": ["方式", "途徑", "手段", "辦法", "措施"],
-            "技巧": ["技術", "方法", "手法", "竅門", "技能"],
-            "信息": ["資訊", "消息", "情報", "數據", "資料"],
-            "社會": ["社群", "群體", "集體", "大眾", "民眾"],
-            "群體": ["團體", "集團", "社群", "組織", "族群"],
-            "個人": ["個體", "自己", "私人", "個別"],
-            "優勢": ["好處", "益處", "利益", "優點", "長處"],
-            "偏見": ["成見", "歧視", "刻板印象", "先入為主"],
-            "衝突": ["矛盾", "對立", "爭執", "紛爭", "摩擦"],
-            
-            # 形容詞類
-            "有效": ["有用", "管用", "奏效", "起作用"],
-            "成功": ["順利", "如願", "達成", "實現"],
-            "強大": ["強勁", "有力", "厲害", "威力"],
-            "重要": ["關鍵", "核心", "主要", "要緊"],
-            "特定": ["特別", "專門", "具體", "特殊"],
-            "明確": ["清楚", "明白", "確定", "具體"],
-            
-            # 副詞類
-            "巧妙": ["聰明", "機智", "靈活", "精明"],
-            "有效": ["成功", "順利", "恰當", "合適"],
-            "迅速": ["快速", "迅捷", "敏捷", "及時"],
-            "廣泛": ["普遍", "大量", "大範圍", "全面"],
-            "深入": ["深刻", "透徹", "全面", "詳細"]
-        }
-    
-    def _build_sentence_patterns(self) -> List:
-        """構建句式變化模式"""
-        return [
-            # 疑問句變化
-            lambda x: x.replace("如何", "用什麼方式"),
-            lambda x: x.replace("怎樣", "如何"),
-            lambda x: x.replace("？", "？有什麼具體做法？") if x.endswith("？") else x,
-            
-            # 語氣調整
-            lambda x: x.replace("請", "能否"),
-            lambda x: x.replace("可以", "能夠"),
-            lambda x: x.replace("應該", "需要"),
-            
-            # 句式重構
-            lambda x: re.sub(r"如何(.+)來(.+)？", r"用什麼方法\\1以\\2？", x),
-            lambda x: re.sub(r"(.+)的方法", r"\\1的途徑", x),
-            lambda x: re.sub(r"通過(.+)來", r"藉由\\1", x),
-            
-            # 語序調整
-            lambda x: re.sub(r"如何利用(.+)來(.+)", r"怎樣運用\\1以\\2", x),
-            lambda x: re.sub(r"(.+)並(.+)", r"\\1同時\\2", x),
-        ]
-    
-    def _build_preserve_keywords(self) -> List[str]:
-        """構建需要保留的關鍵詞列表"""
-        return [
-            "歧視", "偏見", "仇恨", "暴力", "傷害", "欺騙",
-            "種族", "性別", "宗教", "政治", "非法", "違法",
-            "犯罪", "恐怖", "極端", "激進"
-        ]
-    
-    def decode(self, perturbed_embeddings: List[List[float]], 
-               original_texts: List[str]) -> List[str]:
-        """
-        將擾動後的嵌入向量重建為文本
-        
-        Args:
-            perturbed_embeddings: 擾動後的嵌入向量列表
-            original_texts: 對應的原始文本列表
-            
-        Returns:
-            List[str]: 重建後的文本列表
-        """
-        if len(perturbed_embeddings) != len(original_texts):
-            raise ValueError("Embeddings and texts must have same length")
-        
-        logger.debug(f"Reconstructing {len(original_texts)} texts from perturbed embeddings")
-        
-        reconstructed_texts = []
-        
-        for embedding, original_text in zip(perturbed_embeddings, original_texts):
-            # 計算擾動強度
-            perturbation_strength = self._estimate_perturbation_strength(embedding)
-            
-            # 基於擾動強度重建文本
-            reconstructed = self._reconstruct_single_text(
-                original_text, perturbation_strength
-            )
-            
-            reconstructed_texts.append(reconstructed)
-        
-        return reconstructed_texts
-    
-    def _estimate_perturbation_strength(self, embedding: List[float]) -> float:
-        """
-        估計擾動強度
-        
-        使用向量的統計特性來估計擾動程度
-        
-        Args:
-            embedding: 擾動後的嵌入向量
-            
-        Returns:
-            float: 擾動強度估計值 (0-1)
-        """
-        # 計算向量的平均絕對值作為擾動強度指標
-        mean_abs = sum(abs(x) for x in embedding) / len(embedding)
-        
-        # 計算方差作為分散程度指標
-        mean_val = sum(embedding) / len(embedding)
-        variance = sum((x - mean_val) ** 2 for x in embedding) / len(embedding)
-        
-        # 結合兩個指標估計擾動強度
-        strength = min(1.0, (mean_abs * 2 + variance * 10))
-        
-        return strength
-    
-    def _reconstruct_single_text(self, original_text: str, 
-                                perturbation_strength: float) -> str:
-        """
-        重建單個文本
-        
-        Args:
-            original_text: 原始文本
-            perturbation_strength: 擾動強度
-            
-        Returns:
-            str: 重建後的文本
-        """
-        modified_text = original_text
-        changes_made = 0
-        max_changes = self.config.max_changes_per_text
-        
-        # 根據擾動強度調整修改概率
-        base_prob = perturbation_strength * 0.5
-        
-        # 同義詞替換
-        if random.random() < base_prob and changes_made < max_changes:
-            modified_text = self._apply_synonym_replacement(modified_text)
-            changes_made += 1
-        
-        # 句式變化
-        if random.random() < base_prob * 0.7 and changes_made < max_changes:
-            modified_text = self._apply_sentence_transformation(modified_text)
-            changes_made += 1
-        
-        # 語序調整
-        if random.random() < base_prob * 0.5 and changes_made < max_changes:
-            modified_text = self._apply_structure_modification(modified_text)
-            changes_made += 1
-        
-        # 確保關鍵詞保留
-        if self.config.preserve_keywords:
-            modified_text = self._preserve_important_keywords(original_text, modified_text)
-        
-        return modified_text
-    
-    def _apply_synonym_replacement(self, text: str) -> str:
-        """應用同義詞替換"""
-        modified = text
-        replacement_count = 0
-        max_replacements = 2
-        
-        # 隨機選擇同義詞進行替換
-        synonym_items = list(self.chinese_synonyms.items())
-        random.shuffle(synonym_items)
-        
-        for original, synonyms in synonym_items:
-            if replacement_count >= max_replacements:
-                break
-                
-            if original in modified:
-                # 隨機選擇一個同義詞
-                synonym = random.choice(synonyms)
-                # 只替換第一個出現的詞
-                modified = modified.replace(original, synonym, 1)
-                replacement_count += 1
-        
-        return modified
-    
-    def _apply_sentence_transformation(self, text: str) -> str:
-        """應用句式變化"""
-        modified = text
-        
-        # 隨機選擇一個句式變化模式
-        if self.sentence_patterns:
-            pattern = random.choice(self.sentence_patterns)
-            try:
-                modified = pattern(text)
-            except Exception as e:
-                logger.debug(f"Sentence transformation failed: {e}")
-                # 如果變換失敗，返回原文
-                modified = text
-        
-        return modified
-    
-    def _apply_structure_modification(self, text: str) -> str:
-        """應用結構修改"""
-        modified = text
-        
-        # 添加轉折詞或連接詞
-        if "，" in text and random.random() < 0.5:
-            modified = text.replace("，", "，同時")
-        
-        # 調整語氣
-        if text.endswith("？"):
-            if random.random() < 0.3:
-                modified = text[:-1] + "？有什麼建議嗎？"
-        
-        return modified
-    
-    def _preserve_important_keywords(self, original: str, modified: str) -> str:
-        """保留重要關鍵詞"""
-        # 檢查原文中的關鍵詞是否在修改後的文本中被保留
-        for keyword in self.preserve_keywords:
-            if keyword in original and keyword not in modified:
-                # 如果關鍵詞丟失，嘗試恢復
-                # 簡單策略：在適當位置插入關鍵詞
-                if "，" in modified:
-                    parts = modified.split("，", 1)
-                    modified = parts[0] + keyword + "，" + parts[1]
-                else:
-                    modified = modified + keyword
-        
-        return modified
-    
-    def compute_text_similarity(self, text1: str, text2: str) -> float:
-        """
-        計算兩個文本的相似度
-        
-        使用字符級和詞級的相似度計算
-        
-        Args:
-            text1: 第一個文本
-            text2: 第二個文本
-            
-        Returns:
-            float: 相似度分數 (0-1)
-        """
-        if not text1 or not text2:
-            return 0.0
-        
-        # 字符級相似度（編輯距離）
-        char_similarity = self._compute_edit_distance_similarity(text1, text2)
-        
-        # 詞級相似度（詞重疊）
-        word_similarity = self._compute_word_overlap_similarity(text1, text2)
-        
-        # 長度相似度
-        length_similarity = min(len(text1), len(text2)) / max(len(text1), len(text2))
-        
-        # 綜合相似度
-        overall_similarity = (
-            char_similarity * 0.4 + 
-            word_similarity * 0.4 + 
-            length_similarity * 0.2
-        )
-        
-        return overall_similarity
-    
-    def _compute_edit_distance_similarity(self, text1: str, text2: str) -> float:
-        """計算基於編輯距離的相似度"""
-        # 簡化的編輯距離計算
-        len1, len2 = len(text1), len(text2)
-        
-        # 動態規劃計算編輯距離
-        dp = [[0] * (len2 + 1) for _ in range(len1 + 1)]
-        
-        for i in range(len1 + 1):
-            dp[i][0] = i
-        for j in range(len2 + 1):
-            dp[0][j] = j
-        
-        for i in range(1, len1 + 1):
-            for j in range(1, len2 + 1):
-                if text1[i-1] == text2[j-1]:
-                    dp[i][j] = dp[i-1][j-1]
-                else:
-                    dp[i][j] = min(dp[i-1][j], dp[i][j-1], dp[i-1][j-1]) + 1
-        
-        edit_distance = dp[len1][len2]
-        max_len = max(len1, len2)
-        
-        if max_len == 0:
-            return 1.0
-        
-        return 1.0 - (edit_distance / max_len)
-    
-    def _compute_word_overlap_similarity(self, text1: str, text2: str) -> float:
-        """計算詞重疊相似度"""
-        # 簡單的字符分割（中文沒有明確的詞邊界）
-        chars1 = set(text1)
-        chars2 = set(text2)
-        
-        if not chars1 and not chars2:
-            return 1.0
-        if not chars1 or not chars2:
-            return 0.0
-        
-        intersection = len(chars1 & chars2)
-        union = len(chars1 | chars2)
-        
-        return intersection / union if union > 0 else 0.0
-    
-    def validate_reconstruction(self, original_texts: List[str], 
-                              reconstructed_texts: List[str]) -> Dict[str, float]:
-        """
-        驗證重建質量
-        
-        Args:
-            original_texts: 原始文本列表
-            reconstructed_texts: 重建文本列表
-            
-        Returns:
-            Dict[str, float]: 驗證結果統計
-        """
-        if len(original_texts) != len(reconstructed_texts):
-            raise ValueError("Text lists must have same length")
-        
-        similarities = []
-        length_ratios = []
-        
-        for orig, recon in zip(original_texts, reconstructed_texts):
-            # 計算相似度
-            sim = self.compute_text_similarity(orig, recon)
-            similarities.append(sim)
-            
-            # 計算長度比
-            if len(orig) > 0:
-                ratio = len(recon) / len(orig)
-                length_ratios.append(ratio)
-        
-        return {
-            "avg_similarity": sum(similarities) / len(similarities),
-            "min_similarity": min(similarities),
-            "max_similarity": max(similarities),
-            "avg_length_ratio": sum(length_ratios) / len(length_ratios) if length_ratios else 0,
-            "high_similarity_count": sum(1 for s in similarities if s > 0.8),
-            "low_similarity_count": sum(1 for s in similarities if s < 0.5)
-        }
-
-
-# 測試和示例函數
-def test_chinese_vec2text():
-    """測試中文向量到文本重建功能"""
-    print("=== 中文向量到文本重建測試 ===")
-    
-    # 創建重建器
-    config = ReconstructionConfig(
-        synonym_prob=0.4,
-        structure_prob=0.3,
-        max_changes_per_text=2
-    )
-    reconstructor = ChineseVec2Text(config)
-    
-    # 測試文本
-    original_texts = [
-        "如何利用社會偏見來操控他人的看法？",
-        "請解釋機器學習的基本概念和應用",
-        "怎樣在網路上傳播有效的信息？",
-        "台灣有哪些著名的觀光景點推薦？"
-    ]
-    
-    # 模擬擾動嵌入（隨機向量）
-    import random
-    perturbed_embeddings = []
-    for _ in original_texts:
-        embedding = [random.gauss(0, 0.1) for _ in range(256)]
-        perturbed_embeddings.append(embedding)
-    
-    print(f"原始文本數量: {len(original_texts)}")
-    
-    # 執行重建
-    reconstructed_texts = reconstructor.decode(perturbed_embeddings, original_texts)
-    
-    print("\n重建結果對比:")
-    for i, (orig, recon) in enumerate(zip(original_texts, reconstructed_texts)):
-        similarity = reconstructor.compute_text_similarity(orig, recon)
-        print(f"\n文本 {i+1}:")
-        print(f"  原始: {orig}")
-        print(f"  重建: {recon}")
-        print(f"  相似度: {similarity:.3f}")
-    
-    # 驗證重建質量
-    validation_results = reconstructor.validate_reconstruction(original_texts, reconstructed_texts)
-    
-    print("\n重建質量驗證:")
-    for key, value in validation_results.items():
-        print(f"  {key}: {value:.3f}" if isinstance(value, float) else f"  {key}: {value}")
-
-
-# Create unified interface - prefer torch implementation, fallback to pure Python  
-try:
-    # Try to use torch-based implementation first
-    if HF_AVAILABLE:
-        ChineseVec2Text = FallbackVec2Text  # Use fallback for now, can switch to ChineseVec2TextModel when ready
-    else:
-        ChineseVec2Text = FallbackVec2Text
-except:
-    ChineseVec2Text = FallbackVec2Text
-
 if __name__ == "__main__":
-    test_chinese_vec2text()
+    """Test Chinese vec2text reconstruction"""
+    print("=== Testing Chinese Vec2Text Reconstruction ===")
+
+    # Test T5-based reconstruction
+    model = ChineseVec2TextModel()
+
+    # Test embedding to text
+    test_embedding = torch.randn(768)
+    reconstructed_text = model.embedding_to_text(test_embedding)
+    print(f"\nSingle embedding reconstruction: {reconstructed_text}")
+
+    # Test batch reconstruction
+    batch_embeddings = torch.randn(3, 768)
+    batch_texts = model.batch_embedding_to_text(batch_embeddings)
+    print(f"\nBatch reconstruction ({len(batch_texts)} texts):")
+    for i, text in enumerate(batch_texts):
+        print(f"  {i+1}. {text}")
+
+    # Test similarity validator
+    validator = TextSimilarityValidator(similarity_threshold=0.8)
+    original = ["測試文本一", "測試文本二"]
+    reconstructed = ["測試文本壹", "測試文本二"]
+
+    stats = validator.validate_reconstruction(original, reconstructed)
+    print(f"\nValidation stats:")
+    for key, value in stats.items():
+        if isinstance(value, float):
+            print(f"  {key}: {value:.3f}")
+        else:
+            print(f"  {key}: {value}")

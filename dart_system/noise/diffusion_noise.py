@@ -195,7 +195,7 @@ class DiffusionNoise:
             proximity_threshold = self.config.proximity_threshold
         
         batch_size = len(embeddings)
-        embedding_dim = len(embeddings[0]) if embeddings else 0
+        embedding_dim = len(embeddings[0]) if embeddings and len(embeddings) > 0 else 0
         
         logger.debug(f"Sampling perturbations for {batch_size} embeddings with threshold={proximity_threshold}")
         
@@ -228,7 +228,12 @@ class DiffusionNoise:
         
         if violation_count > 0:
             logger.debug(f"Applied constraints to {violation_count}/{batch_size} perturbations")
-        
+
+        # Convert to tensor if input was tensor
+        import torch
+        if isinstance(embeddings, torch.Tensor):
+            return torch.tensor(constrained_perturbations, dtype=embeddings.dtype, device=embeddings.device)
+
         return constrained_perturbations
     
     def _compute_l2_norm(self, vector: List[float]) -> float:
@@ -265,30 +270,36 @@ class DiffusionNoise:
         scaling_factor = threshold / l2_norm
         return [x * scaling_factor for x in vector]
     
-    def apply_perturbation(self, embeddings: List[List[float]], 
-                          perturbations: List[List[float]]) -> List[List[float]]:
+    def apply_perturbation(self, embeddings, perturbations):
         """
         將擾動應用到原始嵌入向量
-        
+
         Args:
-            embeddings: 原始嵌入向量
-            perturbations: 擾動向量
-            
+            embeddings: 原始嵌入向量 (List or Tensor)
+            perturbations: 擾動向量 (List or Tensor)
+
         Returns:
-            List[List[float]]: 擾動後的嵌入向量
+            擾動後的嵌入向量 (same type as input)
         """
+        import torch
+
+        # Handle torch tensors directly
+        if isinstance(embeddings, torch.Tensor) and isinstance(perturbations, torch.Tensor):
+            return embeddings + perturbations
+
+        # Handle lists
         if len(embeddings) != len(perturbations):
             raise ValueError("Embeddings and perturbations must have same batch size")
-        
+
         perturbed_embeddings = []
-        
+
         for orig, pert in zip(embeddings, perturbations):
             if len(orig) != len(pert):
                 raise ValueError("Embedding and perturbation dimensions must match")
-            
+
             perturbed = [o + p for o, p in zip(orig, pert)]
             perturbed_embeddings.append(perturbed)
-        
+
         return perturbed_embeddings
     
     def compute_perturbation_statistics(self, perturbations: List[List[float]]) -> dict:
